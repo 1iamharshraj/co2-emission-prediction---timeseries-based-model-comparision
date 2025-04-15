@@ -1,0 +1,247 @@
+---
+title: "Co2Emission prediction using time series analysis of globaly co2Emission data"
+output:
+  word_document: default
+  html_document: default
+date: "2025-04-14"
+---
+
+
+**Team Members:**  Harsh Raj A(22MID0185) **&** Jesna Binu Mancherikalam(22MID0064)
+
+
+**Data Cleaning**
+
+**1. Importing the important libraries**
+```{r}
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(randomForest)
+library(prophet)
+library(Metrics)
+library(xgboost)
+library(zoo)
+```
+
+
+**2. Importing the dataset**
+```{r}
+co2_raw <- read.csv("C:\\Users\\Harsh\\Downloads\\carbon.csv")
+
+head(co2_raw)
+```
+
+
+**3. Renaming and simplifying the column names**
+```{r}
+co2 <- co2_raw %>%
+  rename_with(~ gsub("\\s+", "_", .)) 
+```
+
+
+**4. Select all the important columns**
+```{r}
+co2_clean <- co2 %>%
+  select(Date, Value, Unit, Indicator, Source)
+```
+
+
+**5. Selecting only where units were Parts-per-million**
+```{r}
+co2_clean <- co2_clean %>%
+    filter(Unit == "Parts Per Million")
+```
+
+
+**6. Converting the date into date datatype and timeseries dataset**
+```{r}
+co2_clean$Date <- ym(gsub("M", "", co2_clean$Date))
+```
+
+
+**7. adding filter to remove all the null values**
+```{r}
+co2_clean <- co2_clean %>%
+  filter(!is.na(Value),Value>0)
+```
+
+
+**8. Arranging/sorting the data according to the date**
+```{r}
+co2_clean <- co2_clean %>%
+  arrange(Date)
+```
+
+
+**9. Saving the cleaned dataset**
+```{r}
+write_csv(co2_clean,"co2_cleaned.csv")
+```
+
+```{r}
+head(co2_clean)
+```
+**Data Preprocessing**
+
+**Feature engineering and adding more relavent features to increase the feature space**
+```{r}
+co2_clean <- co2_clean %>%
+  mutate(
+    year = year(Date),
+    month = month(Date),
+    quarter = quarter(Date)
+  )
+
+```
+
+**Adding rolling avergaes as they are good features in time series datasets**
+
+```{r}
+co2_clean <- co2_clean %>%
+  arrange(Date) %>%
+  mutate(
+    lag_12 = lag(Value, 12),
+    roll_mean_12 = rollmean(Value, 12, fill = NA, align = "right")
+  )
+```
+
+
+
+**selecting only relavent features**
+```{r}
+co2_clean <- co2_clean %>%
+  select(Date, Value, year, month, quarter,roll_mean_12,lag_12)%>%drop_na()
+```
+
+
+```{r}
+head(co2_clean)
+```
+
+
+**Spliting the dataset into train and test**
+```{r}
+split_date <- co2_clean$Date[floor(0.8 * nrow(co2_clean))]
+train <- co2_clean %>% filter(Date <= split_date)
+test  <- co2_clean %>% filter(Date > split_date)
+```
+
+
+**Linear Regression Model**
+```{r}
+model_lm <- lm(Value ~ year + month + lag_12 + roll_mean_12, data = train)
+pred_lm <- predict(model_lm, newdata = test)
+```
+
+**Random Forest Model**
+```{r}
+model_rf <- randomForest(Value ~ year + month + lag_12 + roll_mean_12, data = train)
+pred_rf <- predict(model_rf, newdata = test)
+```
+
+**ARIMA Model**
+```{r}
+ts_train <- ts(train$Value, frequency = 12)
+model_arima <- auto.arima(ts_train)
+pred_arima <- forecast(model_arima, h = nrow(test))$mean
+```
+
+**Facebook's Prophet Model**
+```{r}
+prophet_df <- train %>%
+  select(ds = Date, y = Value)
+
+model_prophet <- prophet(prophet_df)
+future <- make_future_dataframe(model_prophet, periods = nrow(test), freq = "month")
+forecast_prophet <- predict(model_prophet, future)
+pred_prophet <- tail(forecast_prophet$yhat, nrow(test))
+```
+
+**XG-Boost Model**
+```{r}
+train_matrix <- xgb.DMatrix(data = as.matrix(train %>% select(year, month, lag_12, roll_mean_12)), label = train$Value)
+test_matrix <- xgb.DMatrix(data = as.matrix(test %>% select(year, month, lag_12, roll_mean_12)))
+
+model_xgb <- xgboost(data = train_matrix, nrounds = 100, objective = "reg:squarederror", verbose = 0)
+pred_xgb <- predict(model_xgb, test_matrix)
+```
+
+
+**Model Evaluation**
+
+
+```{r}
+results <- tibble(
+  Model = c("Linear Regression", "Random Forest", "ARIMA", "Prophet", "XGBoost"),
+  RMSE = c(
+    rmse(test$Value, pred_lm),
+    rmse(test$Value, pred_rf),
+    rmse(test$Value, pred_arima),
+    rmse(test$Value, pred_prophet),
+    rmse(test$Value, pred_xgb)
+  ),
+  MAE = c(
+    mae(test$Value, pred_lm),
+    mae(test$Value, pred_rf),
+    mae(test$Value, pred_arima),
+    mae(test$Value, pred_prophet),
+    mae(test$Value, pred_xgb)
+  )
+)
+
+print(results)
+```
+
+#**Metrics Vizualization and Model comparision**
+```{r}
+test_plot <- test %>%
+  mutate(
+    pred_lm = pred_lm,
+    pred_rf = pred_rf,
+    pred_arima = as.numeric(pred_arima),
+    pred_prophet = pred_prophet,
+    pred_xgb = pred_xgb
+  )
+```
+
+```{r}
+plot_label <- expression(paste("CO"[2], " (ppm)"))
+
+plot_data <- test %>%
+  select(Date, Actual = Value) %>%
+  mutate(
+    Linear_Regression = pred_lm,
+    Random_Forest = pred_rf,
+    ARIMA = as.numeric(pred_arima),
+    Prophet = pred_prophet,
+    XGBoost = pred_xgb
+  ) %>%
+  pivot_longer(-Date, names_to = "Model", values_to = "Value")
+```
+
+```{r}
+ggplot(plot_data, aes(x = Date, y = Value, color = Model)) +
+  geom_line() +
+  facet_wrap(~ Model, scales = "free_y", ncol = 2) +
+  geom_line(data = test %>% select(Date, Actual = Value), aes(x = Date, y = Actual), color = "black", linewidth = 1) +
+  labs(title = "Model-wise CO2 Predictions vs Actual", y = plot_label, x = "Date") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+```{r}
+results_long <- results %>%
+  pivot_longer(-Model, names_to = "Metric", values_to = "Score")
+
+
+ggplot(results_long, aes(x = reorder(Model, Score), y = Score, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Model Comparison (Lower is Better)", y = "", x = "") +
+  coord_flip() +
+  theme_minimal()
+```
+
+
+
+
+
